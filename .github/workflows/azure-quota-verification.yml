@@ -1,0 +1,47 @@
+name: Azure quota verification
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quota-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install Azure CLI
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ca-certificates curl apt-transport-https lsb-release gnupg
+          curl -sL https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+          AZ_REPO=$(lsb_release -cs)
+          echo "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ $AZ_REPO main" | sudo tee /etc/apt/sources.list.d/azure-cli.list
+          sudo apt-get update -y
+          sudo apt-get install -y azure-cli
+
+      - name: Run quota checks
+        shell: pwsh
+        run: pwsh ./scripts/check-azure-quotas.ps1 -ConfigPath quota-config.json
+        continue-on-error: true
+
+      - name: Upload quota-request artifacts
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: quota-requests
+          path: artifacts/quota-requests/
+
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "❌ Quota verification failed."
+          echo "Check the 'quota-requests' artifact for details."
+          exit 1
+

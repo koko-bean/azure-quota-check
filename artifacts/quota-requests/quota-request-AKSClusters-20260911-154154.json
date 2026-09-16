@@ -1,0 +1,7 @@
+{
+  "details": "found=0 in eastus",
+  "provider": "AKSList",
+  "required": 1,
+  "available": 0,
+  "resource": "AKSClusters"
+}

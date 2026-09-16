@@ -1,0 +1,7 @@
+{
+  "details": "found=0 in eastus",
+  "provider": "Network.PublicIPList",
+  "required": 2,
+  "available": 0,
+  "resource": "PublicIPAddresses"
+}
