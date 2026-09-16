@@ -1,0 +1,94 @@
+# GitHub Actions Integration
+
+Use this folder to integrate Azure quota checks into GitHub Actions workflows.
+
+## Setup
+
+### 1. Add the Workflow
+
+Copy `workflows/azure-quota-verification.yml` to your repository:
+
+```bash
+mkdir -p .github/workflows
+cp github-actions/workflows/azure-quota-verification.yml .github/workflows/
+```
+
+### 2. Create Azure Service Principal
+
+From your Azure subscription, run:
+
+```bash
+az ad sp create-for-rbac --name "github-actions-quota-check" \
+  --role Reader \
+  --scopes /subscriptions/<your-subscription-id> \
+  --sdk-auth -o json
+```
+
+Copy the JSON output.
+
+### 3. Add GitHub Secret
+
+Go to **Repository Settings → Secrets and variables → Actions → New repository secret**:
+- **Name:** `AZURE_CREDENTIALS`
+- **Value:** Paste the JSON from step 2
+
+### 4. Configure Quotas
+
+Edit `quota-config.json` in your repository root:
+
+```json
+{
+  "subscriptionId": "your-subscription-id",
+  "location": "eastus",
+  "vcpu": { "required": 10 },
+  "appServicePlans": { "required": 2 },
+  "aks": { "requiredClusters": 1 },
+  "containerApps": { "required": 5 },
+  "publicIpAddresses": { "required": 2 }
+}
+```
+
+### 5. Commit & Push
+
+Commit both files and push to a branch → open PR. The workflow runs automatically.
+
+Or manually trigger: **Actions → azure-quota-verification → Run workflow**.
+
+## How It Works
+
+- Workflow runs on every PR and manual dispatch
+- Authenticates with service principal using AZURE_CREDENTIALS secret
+- Calls `scripts/check-azure-quotas.ps1` to validate quotas
+- If quotas are insufficient, generates artifacts with 3 submission options:
+  1. **Azure Portal** (manual)
+  2. **CLI auto-submit** (requires Microsoft.Support permissions)
+  3. **GitHub Issue** (fallback, no special permissions)
+- Uploads artifacts to GitHub Actions for download
+
+## Exit Codes
+
+- **0**: All checks passed ✅
+- **2**: Quotas insufficient; artifacts generated ⚠️
+- **3+**: Script error ❌
+
+## Troubleshooting
+
+### "AZURE_CREDENTIALS secret not found"
+
+- Go to **Settings → Secrets and variables → Actions**
+- Verify the secret exists and contains valid JSON
+
+### "Quota verification failed"
+
+- Check the **quota-requests** artifact in the workflow run
+- Review the summary markdown for details
+- Follow one of the 3 submission options to request increases
+
+### "Role assignment creation failed"
+
+- Ensure your Azure account has `Owner` or `User Access Administrator` role in the subscription
+- Or ask a subscription admin to run the `az ad sp create-for-rbac` command for you
+
+## More Info
+
+See the main [README.md](../README.md) for script details and configuration options.

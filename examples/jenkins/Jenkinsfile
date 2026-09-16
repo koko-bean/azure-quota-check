@@ -1,0 +1,81 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'AZURE_SUBSCRIPTION_ID', description: 'Azure subscription ID', defaultValue: '')
+        string(name: 'AZURE_TENANT_ID', description: 'Azure tenant ID', defaultValue: '')
+        string(name: 'AZURE_CLIENT_ID', description: 'Service principal client ID', defaultValue: '')
+        password(name: 'AZURE_CLIENT_SECRET', description: 'Service principal client secret')
+    }
+
+    environment {
+        AZURE_SUBSCRIPTION_ID = "${params.AZURE_SUBSCRIPTION_ID}"
+        AZURE_TENANT_ID = "${params.AZURE_TENANT_ID}"
+        AZURE_CLIENT_ID = "${params.AZURE_CLIENT_ID}"
+        AZURE_CLIENT_SECRET = "${params.AZURE_CLIENT_SECRET}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Authenticate with Azure') {
+            steps {
+                script {
+                    sh '''
+                        az login --service-principal \
+                          -u "${AZURE_CLIENT_ID}" \
+                          -p "${AZURE_CLIENT_SECRET}" \
+                          --tenant "${AZURE_TENANT_ID}"
+                        
+                        az account set --subscription "${AZURE_SUBSCRIPTION_ID}"
+                        
+                        echo "✓ Authenticated with Azure"
+                        az account show
+                    '''
+                }
+            }
+        }
+
+        stage('Check Azure Quotas') {
+            steps {
+                script {
+                    sh '''
+                        pwsh ./scripts/check-azure-quotas.ps1 -ConfigPath quota-config.json
+                    '''
+                }
+            }
+        }
+
+        stage('Archive Quota Artifacts') {
+            when {
+                fileExists 'artifacts/quota-requests/'
+            }
+            steps {
+                archiveArtifacts artifacts: 'artifacts/quota-requests/**', allowEmptyArchive: true
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo """
+            ❌ Quota verification failed.
+            
+            Check the 'quota-requests' artifacts for details.
+            
+            Next steps:
+            1. Review the summary markdown in the artifacts
+            2. Submit a support request via Azure Portal
+            3. Or run: pwsh ./scripts/submit-azure-support-ticket.ps1 -ContactName "..." -ContactEmail "..." -AutoConfirm
+            4. Or create a GitHub issue: pwsh ./scripts/create-github-quota-issue.ps1 -Owner "..." -Repo "..." -RepoToken <token>
+            """
+        }
+        success {
+            echo "✓ Quota checks passed"
+        }
+    }
+}

@@ -1,0 +1,82 @@
+trigger:
+  - main
+  - develop
+
+pr:
+  - main
+  - develop
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  AZURE_SUBSCRIPTION_ID: $(azureSubscriptionId)  # Set in Azure DevOps pipeline variables
+  AZURE_TENANT_ID: $(azureTenantId)              # Set in Azure DevOps pipeline variables
+  AZURE_CLIENT_ID: $(azureClientId)              # Set in Azure DevOps pipeline variables
+  # AZURE_CLIENT_SECRET should be set as a secret variable in the pipeline
+
+stages:
+  - stage: QuotaCheck
+    displayName: 'Check Azure Quotas'
+    jobs:
+      - job: VerifyQuotas
+        displayName: 'Verify Azure Quotas'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.9'
+            displayName: 'Use Python 3.9'
+
+          - script: |
+              curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+              az --version
+            displayName: 'Install Azure CLI'
+
+          - script: |
+              sudo apt-get update
+              sudo apt-get install -y powershell
+              pwsh -Version
+            displayName: 'Install PowerShell'
+
+          - script: |
+              az login --service-principal \
+                -u "$(AZURE_CLIENT_ID)" \
+                -p "$(AZURE_CLIENT_SECRET)" \
+                --tenant "$(AZURE_TENANT_ID)"
+              
+              az account set --subscription "$(AZURE_SUBSCRIPTION_ID)"
+              
+              echo "✓ Authenticated with Azure"
+              az account show
+            displayName: 'Authenticate with Azure'
+            env:
+              AZURE_CLIENT_SECRET: $(azureClientSecret)
+
+          - script: |
+              pwsh ./scripts/check-azure-quotas.ps1 -ConfigPath quota-config.json
+            displayName: 'Run Quota Checks'
+            continueOnError: true
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: 'artifacts/quota-requests'
+              artifactName: 'quota-requests'
+              publishLocation: 'Container'
+            condition: always()
+            displayName: 'Publish Quota Artifacts'
+
+          - script: |
+              if [ -d "artifacts/quota-requests" ]; then
+                echo "##vso[task.logissue type=error]Quota verification failed"
+                echo ""
+                echo "Check the 'quota-requests' artifact for details."
+                echo ""
+                echo "Next steps:"
+                echo "1. Review the summary markdown"
+                echo "2. Submit a support request via Azure Portal"
+                echo "3. Or run: pwsh ./scripts/submit-azure-support-ticket.ps1 -ContactName \"...\" -ContactEmail \"...\" -AutoConfirm"
+                echo "4. Or create a GitHub issue: pwsh ./scripts/create-github-quota-issue.ps1 -Owner \"...\" -Repo \"...\" -RepoToken \$env:GITHUB_TOKEN"
+                exit 1
+              fi
+            displayName: 'Verify Quota Check Success'
+            condition: always()

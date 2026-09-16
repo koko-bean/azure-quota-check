@@ -1,0 +1,52 @@
+stages:
+  - quota-check
+
+variables:
+  AZURE_SUBSCRIPTION_ID: "$CI_COMMIT_BRANCH"  # Example: pass via CI/CD variable
+  AZURE_TENANT_ID: "$AZURE_TENANT_ID"         # Set in GitLab CI/CD settings
+  AZURE_CLIENT_ID: "$AZURE_CLIENT_ID"         # Set in GitLab CI/CD settings
+  AZURE_CLIENT_SECRET: "$AZURE_CLIENT_SECRET" # Set in GitLab CI/CD settings (masked)
+
+check-azure-quotas:
+  stage: quota-check
+  image: mcr.microsoft.com/azure-cli:latest
+  before_script:
+    # Install PowerShell
+    - apt-get update -y
+    - apt-get install -y powershell
+    
+    # Authenticate with Azure
+    - >
+      az login --service-principal
+      -u "$AZURE_CLIENT_ID"
+      -p "$AZURE_CLIENT_SECRET"
+      --tenant "$AZURE_TENANT_ID"
+    - az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+    - echo "✓ Authenticated with Azure"
+    - az account show
+  script:
+    # Run quota checks
+    - pwsh ./scripts/check-azure-quotas.ps1 -ConfigPath quota-config.json
+  artifacts:
+    paths:
+      - artifacts/quota-requests/
+    expire_in: 30 days
+    when: on_failure
+  on_failure:
+    - echo "❌ Quota verification failed"
+    - echo "Check the artifacts for quota-requests details"
+    - echo ""
+    - echo "Next steps:"
+    - echo "1. Review the summary markdown in artifacts/quota-requests/"
+    - echo "2. Submit a support request via Azure Portal"
+    - echo "3. Or run: pwsh ./scripts/submit-azure-support-ticket.ps1 -ContactName \"...\" -ContactEmail \"...\" -AutoConfirm"
+    - echo "4. Or create a GitHub issue: pwsh ./scripts/create-github-quota-issue.ps1 -Owner \"...\" -Repo \"...\" -RepoToken \$CI_JOB_TOKEN"
+  retry:
+    max: 1
+    when:
+      - script_failure
+  allow_failure: false
+  only:
+    - merge_requests
+    - main
+    - develop
