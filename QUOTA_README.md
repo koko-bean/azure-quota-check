@@ -10,7 +10,9 @@ Copy the returned JSON and add it as a GitHub repository secret named AZURE_CRED
 
 2) Configure quotas to check
 
-Copy quota-config.sample.json to quota-config.json and edit fields (location, required vCPUs, counts for App Service Plans / AKS / Container Apps / Public IPs).
+Copy quota-config.sample.json to quota-config.json and add the provider quota
+resources consumed by the deployment. Discover names with `az quota list`;
+resource counts are not quota availability.
 
 3) Behavior
 

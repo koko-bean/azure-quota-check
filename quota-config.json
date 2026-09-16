@@ -1,9 +1,27 @@
 {
   "subscriptionId": "9356cae4-0781-46fc-b472-a08d9c28c423",
   "location": "eastus",
-  "vcpu": { "required": 10 },
-  "appServicePlans": { "required": 2 },
-  "aks": { "requiredClusters": 1 },
-  "containerApps": { "required": 5 },
-  "publicIpAddresses": { "required": 2 }
+  "quotas": [
+    {
+      "name": "Total regional vCPUs",
+      "providerNamespace": "Microsoft.Compute",
+      "resourceName": "cores",
+      "resourceType": "dedicated",
+      "requiredAvailable": 10
+    },
+    {
+      "name": "Container Apps managed environments",
+      "providerNamespace": "Microsoft.App",
+      "resourceName": "ManagedEnvironmentCount",
+      "resourceType": "dedicated",
+      "requiredAvailable": 1
+    },
+    {
+      "name": "Standard IPv4 public addresses",
+      "providerNamespace": "Microsoft.Network",
+      "resourceName": "IPv4StandardSkuPublicIpAddresses",
+      "resourceType": "dedicated",
+      "requiredAvailable": 2
+    }
+  ]
 }

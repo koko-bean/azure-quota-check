@@ -40,13 +40,20 @@ Edit `quota-config.json` in your repository root:
 {
   "subscriptionId": "your-subscription-id",
   "location": "eastus",
-  "vcpu": { "required": 10 },
-  "appServicePlans": { "required": 2 },
-  "aks": { "requiredClusters": 1 },
-  "containerApps": { "required": 5 },
-  "publicIpAddresses": { "required": 2 }
+  "quotas": [
+    {
+      "name": "Total regional vCPUs",
+      "providerNamespace": "Microsoft.Compute",
+      "resourceName": "cores",
+      "resourceType": "dedicated",
+      "requiredAvailable": 10
+    }
+  ]
 }
 ```
+
+Before the workflow can run, a subscription owner must register
+`Microsoft.Quota`. Use `az quota list` to discover valid quota resource names.
 
 ### 5. Commit & Push
 

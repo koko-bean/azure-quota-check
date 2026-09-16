@@ -53,7 +53,8 @@ azure-quota-check/
 ├── scripts/ (pure PowerShell, CI/CD agnostic)
 │   ├── README.md (usage guide)
 │   ├── check-azure-quotas.ps1 (main quota checker)
-│   ├── submit-azure-support-ticket.ps1 (auto-submit support tickets)
+│   ├── request-azure-quota.ps1 (adjustable quota requests)
+│   ├── submit-azure-support-ticket.ps1 (support-ticket fallback)
 │   └── create-github-quota-issue.ps1 (GitHub issue fallback)
 │
 └── examples/ (sample CI/CD configurations)
@@ -66,25 +67,81 @@ azure-quota-check/
 
 | Resource | Source | Check Type |
 |----------|--------|-----------|
-| vCPU | az vm list-usage | Provider API (strict) |
-| App Service Plans | az appservice plan list | Resource count |
-| AKS | az aks list | Resource count + Provider API |
-| Container Apps | az containerapp list | Resource count + Provider API |
-| Public IPs | az network public-ip list | Resource count |
+| vCPU and VM families | `az quota` | Available capacity |
+| App Service | `az quota` when supported | SKU-specific available capacity |
+| AKS dependencies | `az quota` | VM-family and network capacity |
+| Container Apps | `az quota` | Environment and workload-profile capacity |
+| Public IPs | `az quota` | Available capacity |
 
 ## How It Works
 
 1. **Authenticate** with Azure (service principal or user credentials)
-2. **Query resources** using Azure CLI and REST APIs
-3. **Compare** current usage/count against `quota-config.json` requirements
+2. **Query quota limits and usage** with the Azure CLI quota extension
+3. **Compare** remaining capacity against `quota-config.json` requirements
 4. **Generate artifacts** if any quota is insufficient:
    - Human-readable markdown summary
    - Per-resource JSON details
 5. **Exit with code 2** to signal deployment halt
-6. **Offer 3 submission options** for quota increases:
+6. **Offer 4 submission options** for quota increases:
    - Azure Portal (manual)
-   - CLI auto-submit (requires permissions)
-   - GitHub issue (fallback, no special permissions)
+   - Azure Quota API through `az quota update`
+   - Azure Support API fallback
+   - GitHub issue fallback
+
+## Workflow Diagram
+
+```mermaid
+flowchart TD
+    A[Deployment pipeline starts] --> B[Authenticate to Azure]
+    B --> C{Azure context matches<br/>configured subscription?}
+    C -- No --> X1[Exit 3: configuration or authentication error]
+    C -- Yes --> D{Quota extension installed?}
+    D -- No --> X2[Exit 3: install Azure CLI quota extension]
+    D -- Yes --> E{Microsoft.Quota registered?}
+    E -- No --> X3[Exit 3: subscription owner must register provider]
+    E -- Yes --> F[Load configured provider quota resources]
+
+    F --> G[Query limit with az quota show]
+    G --> H[Query usage with az quota usage show]
+    H --> I[Calculate available = limit - usage]
+    I --> J{Available capacity meets<br/>deployment requirement?}
+
+    J -- Yes --> K{More configured quotas?}
+    K -- Yes --> G
+    K -- No --> P[Exit 0: allow deployment]
+
+    J -- No --> L[Calculate requested limit]
+    L --> M[Write per-resource JSON artifact]
+    M --> N[Write Markdown summary]
+    N --> K
+    K -- No, deficits found --> Q[Exit 2: halt deployment]
+
+    Q --> R{Choose remediation path}
+    R --> S[Azure Portal request]
+    R --> T[Preview request-azure-quota.ps1]
+    R --> U[Preview support-ticket payloads]
+    R --> V[Create GitHub issue]
+
+    T --> T1{Explicit -Submit<br/>and Quota Request Operator?}
+    T1 -- No --> T2[Dry-run only]
+    T1 -- Yes --> T3[Submit az quota update]
+    T3 --> T4[Check quota request status]
+
+    U --> U1{Explicit -Submit<br/>and Support permissions?}
+    U1 -- No --> U2[Dry-run only]
+    U1 -- Yes --> U3[Create one support ticket<br/>per quota category]
+
+    S --> W[Azure processes request]
+    T4 --> W
+    U3 --> W
+    V --> Y[Cloud operations reviews issue]
+    W --> Z[Re-run quota validation]
+    Y --> Z
+    Z --> G
+```
+
+The request scripts are dry-run-first. They do not change quota or create
+support tickets unless `-Submit` is explicitly supplied.
 
 ## Exit Codes
 
@@ -100,19 +157,25 @@ azure-quota-check/
 {
   "subscriptionId": "your-subscription-id",
   "location": "eastus",
-  "vcpu": { "required": 10 },
-  "appServicePlans": { "required": 2 },
-  "aks": { "requiredClusters": 1 },
-  "containerApps": { "required": 5 },
-  "publicIpAddresses": { "required": 2 }
+  "quotas": [
+    {
+      "name": "Total regional vCPUs",
+      "providerNamespace": "Microsoft.Compute",
+      "resourceName": "cores",
+      "resourceType": "dedicated",
+      "requiredAvailable": 10
+    }
+  ]
 }
 ```
 
-All fields optional except `location`. Customize based on your deployment needs.
+Use `az quota list` to discover the quota resource names exposed for each
+provider and region. AKS and App Service must be represented by the underlying
+VM-family, networking, environment, or SKU quotas consumed by the deployment.
 
 ## Requesting Quota Increases
 
-When quotas are insufficient, artifacts are generated with 3 submission options:
+When quotas are insufficient, artifacts are generated with 4 submission options:
 
 ### Option 1: Azure Portal (Manual)
 
@@ -121,16 +184,29 @@ When quotas are insufficient, artifacts are generated with 3 submission options:
 3. Attach JSON files from `artifacts/quota-requests/`
 4. Submit
 
-### Option 2: CLI (Automated, requires Microsoft.Support permissions)
+### Option 2: Azure Quota API (requires Quota Request Operator)
+
+```bash
+pwsh ./scripts/request-azure-quota.ps1
+
+# Submit after reviewing the dry-run output
+pwsh ./scripts/request-azure-quota.ps1 -Submit
+```
+
+### Option 3: Azure Support API fallback
 
 ```bash
 pwsh ./scripts/submit-azure-support-ticket.ps1 \
   -ContactName "Your Name" \
   -ContactEmail "you@example.com" \
-  -AutoConfirm
+  -Country "USA" \
+  -TimeZone "Eastern Standard Time"
 ```
 
-### Option 3: GitHub Issue (Fallback, no special permissions)
+The support script is dry-run-first and creates one ticket per quota category
+only when `-Submit` is supplied.
+
+### Option 4: GitHub Issue (Fallback, no special permissions)
 
 ```bash
 export GITHUB_TOKEN="ghp_..."
@@ -199,11 +275,11 @@ ls artifacts/quota-requests/
 
 ## Troubleshooting
 
-### Quota checks return incomplete data
+### Microsoft.Quota is not registered
 
-- Verify service principal has `Reader` role
-- Check region availability for services
-- Register providers: `az provider register --namespace Microsoft.App`
+A subscription owner must run
+`az provider register --namespace Microsoft.Quota`. The validation identity
+needs Reader; submitting increases requires Quota Request Operator.
 
 ### Support ticket creation fails with 403
 

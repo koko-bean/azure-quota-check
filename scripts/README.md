@@ -6,12 +6,14 @@ Pure PowerShell scripts for verifying Azure quotas. No CI/CD tool dependencies�
 
 ### check-azure-quotas.ps1
 
-Main quota verification script. Checks:
-- **vCPU** — Current compute usage vs. subscription limit
-- **App Service Plans** — Current count vs. required
-- **AKS** — Cluster count + provider API queries
-- **Container Apps** — Managed environment count + API queries
-- **Public IPs** — Current count vs. required
+Main quota verification script. It uses `az quota show` and
+`az quota usage show` to compare available quota with deployment requirements.
+Configure the quota resources needed by the deployment, such as:
+
+- **AKS** — VM-family vCPU and Public IP quota used by the cluster
+- **Container Apps** — `ManagedEnvironmentCount` and workload-profile quota
+- **App Service** — SKU-specific Microsoft.Web quota discovered for the subscription
+- **Networking** — Standard Public IPv4 address quota
 
 **Usage:**
 
@@ -21,6 +23,7 @@ pwsh ./scripts/check-azure-quotas.ps1 -ConfigPath quota-config.json
 
 **Parameters:**
 - `-ConfigPath` — Path to JSON config file (default: `quota-config.json`)
+- `-VerboseOutput` — Print each Azure CLI command
 
 **Exit Codes:**
 - `0` — All checks passed ✅
@@ -32,9 +35,25 @@ pwsh ./scripts/check-azure-quotas.ps1 -ConfigPath quota-config.json
   - `quota-request-summary-<timestamp>.md` — Human-readable summary
   - `quota-request-<Resource>-<timestamp>.json` — Per-resource details
 
+### request-azure-quota.ps1
+
+Preview or submit adjustable quota increases through `az quota update`.
+
+```powershell
+# Dry run
+pwsh ./scripts/request-azure-quota.ps1
+
+# Submit after reviewing the generated commands
+pwsh ./scripts/request-azure-quota.ps1 -Submit
+```
+
+Submission requires the `Microsoft.Quota` provider to be registered and the
+caller to have the **Quota Request Operator** role.
+
 ### submit-azure-support-ticket.ps1
 
-Auto-submit Azure support tickets for quota increase requests.
+Prepare one Azure Support ticket per quota category. The script is a dry run
+unless `-Submit` is supplied and uses Support API version `2024-04-01`.
 
 **Usage:**
 
@@ -42,15 +61,26 @@ Auto-submit Azure support tickets for quota increase requests.
 pwsh ./scripts/submit-azure-support-ticket.ps1 `
   -ContactName "Your Name" `
   -ContactEmail "your@example.com" `
-  [-Severity "moderate"] `
-  [-AutoConfirm]
+  -Country "USA" `
+  -TimeZone "Eastern Standard Time"
+
+# Create tickets after reviewing the payloads
+pwsh ./scripts/submit-azure-support-ticket.ps1 `
+  -ContactName "Your Name" `
+  -ContactEmail "your@example.com" `
+  -Country "USA" `
+  -TimeZone "Eastern Standard Time" `
+  -Submit
 ```
 
 **Parameters:**
 - `-ContactName` — Your name (required)
 - `-ContactEmail` — Your email (required)
-- `-Severity` — Issue severity: `minimal`, `moderate`, `critical` (default: `moderate`)
-- `-AutoConfirm` — Skip confirmation and submit immediately
+- `-Country` — Contact country required by the Support API
+- `-TimeZone` — Windows time-zone name required by the Support API
+- `-Severity` — `minimal`, `moderate`, or `critical` (default: `minimal`)
+- `-Submit` — Create tickets; omitted means dry run
+- `-AutoConfirm` — Skip the prompt when combined with `-Submit`
 
 **Requirements:**
 - `Microsoft.Support/supportTickets/*` permissions (contact your Azure admin)
@@ -113,15 +143,26 @@ Scripts read from `quota-config.json`:
 {
   "subscriptionId": "your-subscription-id",
   "location": "eastus",
-  "vcpu": { "required": 10 },
-  "appServicePlans": { "required": 2 },
-  "aks": { "requiredClusters": 1 },
-  "containerApps": { "required": 5 },
-  "publicIpAddresses": { "required": 2 }
+  "quotas": [
+    {
+      "name": "Total regional vCPUs",
+      "providerNamespace": "Microsoft.Compute",
+      "resourceName": "cores",
+      "resourceType": "dedicated",
+      "requiredAvailable": 10
+    }
+  ]
 }
 ```
 
-Copy from `quota-config.sample.json` and customize.
+Copy from `quota-config.sample.json`, then discover valid resource names with:
+
+```powershell
+az quota list --scope /subscriptions/<id>/providers/<provider>/locations/<region> --output table
+```
+
+There is no universal "AKS cluster count" or "App Service Plan count" quota.
+Configure the underlying provider quotas consumed by the planned SKU and topology.
 
 ## Integration Examples
 
@@ -151,25 +192,29 @@ pwsh ./scripts/check-azure-quotas.ps1 -ConfigPath quota-config.json
 # 4. Check artifacts
 ls artifacts/quota-requests/
 
-# 5. (Optional) Submit quota request
+# 5. Preview quota updates
+pwsh ./scripts/request-azure-quota.ps1
+
+# 6. (Optional) Preview support-ticket fallback
 pwsh ./scripts/submit-azure-support-ticket.ps1 \
   -ContactName "Your Name" \
   -ContactEmail "you@example.com" \
-  -AutoConfirm
+  -Country "USA" \
+  -TimeZone "Eastern Standard Time"
 ```
 
 ## Troubleshooting
 
-### "Could not find vCPU usage entry"
+### "Microsoft.Quota is NotRegistered"
 
-Regional vCPU queries may not work for all subscription types. Script skips this check gracefully; it's not a hard failure.
+A subscription owner must run:
 
-### "Provider API Not Found or InvalidResourceType"
+```powershell
+az provider register --namespace Microsoft.Quota
+```
 
-Script auto-discovers API versions per provider. If failures persist:
-- Verify service principal has `Reader` role
-- Check subscription availability in target region
-- Register provider: `az provider register --namespace Microsoft.App`
+The pipeline identity needs Reader to check quota and **Quota Request Operator**
+to submit increases.
 
 ### "Support ticket creation failed with 403"
 
@@ -195,18 +240,17 @@ pwsh ./scripts/create-github-quota-issue.ps1 -Owner "you" -Repo "your-repo" -Rep
 
 - vCPU check: ~2-5 seconds
 - Resource counts: ~3-10 seconds per service
-- Provider API discovery & queries: ~10-20 seconds
-- **Total**: ~30-60 seconds depending on subscription size and network
+- Quota query pair: ~2-10 seconds per configured resource
+- **Total**: typically under one minute
 
 ## Contributing
 
 To extend for additional Azure services:
 
 1. Add a new quota object to `quota-config.sample.json`
-2. Add a check function in `check-azure-quotas.ps1`
-3. Call `az <service> list` or provider REST APIs
-4. Compare against config and record deficits in `$global:deficits`
-5. Update this README with the new check
+2. Discover its quota resource name with `az quota list`
+3. Add the provider, quota resource name, and required available capacity
+4. Update this README with the mapping
 
 ## Support
 
