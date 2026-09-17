@@ -90,7 +90,38 @@ Write-Host "Subscription: $subscriptionId"
 Write-Host "Location:     $($config.location)"
 Write-Host "Principal:    $($account.user.name) ($($account.user.type))"
 
+function Test-VmSkuAvailability {
+  param(
+    [Parameter(Mandatory)][string]$Sku,
+    [Parameter(Mandatory)][string]$Location
+  )
+
+  $skuResult = Invoke-AzJson -Arguments @(
+    'vm', 'list-skus',
+    '--location', $Location,
+    '--query', "[?name=='$Sku']",
+    '--output', 'json'
+  ) -Description "SKU availability lookup for $Sku in $Location"
+
+  if (-not $skuResult -or $skuResult.Count -eq 0) {
+    return [pscustomobject]@{ Found = $false; Family = $null; Available = $false; Restrictions = @() }
+  }
+
+  $skuInfo = $skuResult[0]
+  $locationRestrictions = @($skuInfo.restrictions | Where-Object { $_.type -eq 'Location' })
+  $zoneRestrictions = @($skuInfo.restrictions | Where-Object { $_.type -eq 'Zone' })
+
+  return [pscustomobject]@{
+    Found = $true
+    Family = [string]$skuInfo.family
+    Available = ($locationRestrictions.Count -eq 0)
+    Restrictions = @($skuInfo.restrictions)
+    ZoneRestricted = ($zoneRestrictions.Count -gt 0)
+  }
+}
+
 $deficits = @()
+$skuIssues = @()
 $checkErrors = @()
 
 Write-Step "Checking configured quotas"
@@ -98,16 +129,61 @@ foreach ($quota in $config.quotas) {
   $displayName = if ($quota.name) { [string]$quota.name } else { [string]$quota.resourceName }
   $providerNamespace = [string]$quota.providerNamespace
   $resourceName = [string]$quota.resourceName
+  $vmSku = [string]$quota.vmSku
   $requiredAvailable = [int]$quota.requiredAvailable
   $resourceType = if ($quota.resourceType) { [string]$quota.resourceType } else { 'dedicated' }
+
+  Write-Host "`n[$displayName]" -ForegroundColor Yellow
+  Write-Host "Provider:           $providerNamespace"
+
+  if ($vmSku) {
+    Write-Host "VM SKU:             $vmSku"
+    try {
+      $skuCheck = Test-VmSkuAvailability -Sku $vmSku -Location $config.location
+    } catch {
+      $checkErrors += "$displayName SKU availability lookup failed: $_"
+      Write-Warning $checkErrors[-1]
+      continue
+    }
+
+    if (-not $skuCheck.Found) {
+      $skuIssues += [pscustomobject]@{
+        requestType = 'sku-unavailable'
+        name = $displayName
+        vmSku = $vmSku
+        location = [string]$config.location
+        reason = 'SKU not returned by az vm list-skus for this location. It may not exist or may not be offered to this subscription.'
+      }
+      Write-Warning "SKU $vmSku was not found in $($config.location) for this subscription."
+      continue
+    }
+
+    if (-not $skuCheck.Available) {
+      $skuIssues += [pscustomobject]@{
+        requestType = 'sku-unavailable'
+        name = $displayName
+        vmSku = $vmSku
+        location = [string]$config.location
+        reason = 'SKU is restricted for this subscription in this location. Choose a different region or request access; a quota increase will not resolve this.'
+      }
+      Write-Warning "SKU $vmSku is not available for this subscription in $($config.location). This is a regional/subscription restriction, not a quota limit."
+      continue
+    }
+
+    if ($skuCheck.ZoneRestricted) {
+      Write-Warning "SKU $vmSku has availability-zone restrictions in $($config.location). Verify the target zone before deploying."
+    }
+
+    Write-Host "VM family:          $($skuCheck.Family)"
+    if (-not $resourceName) { $resourceName = $skuCheck.Family }
+  }
+
   $scope = if ($quota.scope) {
     [string]$quota.scope
   } else {
     "/subscriptions/$subscriptionId/providers/$providerNamespace/locations/$($config.location)"
   }
 
-  Write-Host "`n[$displayName]" -ForegroundColor Yellow
-  Write-Host "Provider:           $providerNamespace"
   Write-Host "Quota resource:     $resourceName"
   Write-Host "Required available: $requiredAvailable"
   Write-Host "Scope:              $scope"
@@ -175,9 +251,9 @@ if ($checkErrors.Count -gt 0) {
   exit 3
 }
 
-if ($deficits.Count -eq 0) {
+if ($deficits.Count -eq 0 -and $skuIssues.Count -eq 0) {
   Write-Step "Quota validation passed"
-  Write-Host "All configured quotas have sufficient available capacity." -ForegroundColor Green
+  Write-Host "All configured quotas have sufficient available capacity and all requested SKUs are available." -ForegroundColor Green
   exit 0
 }
 
@@ -189,6 +265,23 @@ $summaryPath = Join-Path $artifactDirectory "quota-request-summary-$timestamp.md
 $summary = New-Object System.Text.StringBuilder
 $summary.AppendLine("# Quota request summary - $timestamp") | Out-Null
 $summary.AppendLine() | Out-Null
+
+if ($skuIssues.Count -gt 0) {
+  $summary.AppendLine("## SKU availability issues (not fixable by quota request)") | Out-Null
+  $summary.AppendLine() | Out-Null
+  foreach ($issue in $skuIssues) {
+    $safeName = $issue.vmSku -replace '[^A-Za-z0-9._-]', '-'
+    $artifactPath = Join-Path $artifactDirectory "sku-issue-$safeName-$timestamp.json"
+    $issue | ConvertTo-Json -Depth 8 | Out-File -FilePath $artifactPath -Encoding utf8
+
+    $summary.AppendLine("### $($issue.name)") | Out-Null
+    $summary.AppendLine("- VM SKU: $($issue.vmSku)") | Out-Null
+    $summary.AppendLine("- Location: $($issue.location)") | Out-Null
+    $summary.AppendLine("- Issue: $($issue.reason)") | Out-Null
+    $summary.AppendLine() | Out-Null
+  }
+  Write-Warning "$($skuIssues.Count) SKU availability issue(s) found. These require a different region or SKU; a quota increase will not help."
+}
 
 foreach ($deficit in $deficits) {
   $safeName = $deficit.resourceName -replace '[^A-Za-z0-9._-]', '-'

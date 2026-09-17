@@ -3,6 +3,13 @@
   "location": "eastus",
   "quotas": [
     {
+      "name": "Standard D-family v5 vCPUs",
+      "providerNamespace": "Microsoft.Compute",
+      "vmSku": "Standard_D4s_v5",
+      "resourceType": "dedicated",
+      "requiredAvailable": 16
+    },
+    {
       "name": "Total regional vCPUs",
       "providerNamespace": "Microsoft.Compute",
       "resourceName": "cores",

@@ -101,22 +101,33 @@ flowchart TD
     E -- No --> X3[Exit 3: subscription owner must register provider]
     E -- Yes --> F[Load configured provider quota resources]
 
-    F --> G[Query limit with az quota show]
-    G --> H[Query usage with az quota usage show]
+    F --> F1{Entry specifies vmSku?}
+    F1 -- Yes --> F2[Query az vm list-skus for SKU in region]
+    F2 --> F3{SKU returned and<br/>not Location-restricted?}
+    F3 -- No --> F4[Record SKU availability issue<br/>not a quota deficit]
+    F4 --> K
+    F3 -- Yes --> F5[Resolve VM family from SKU]
+    F5 --> G
+    F1 -- No --> G
+
+    G[Query limit with az quota show] --> H[Query usage with az quota usage show]
     H --> I[Calculate available = limit - usage]
     I --> J{Available capacity meets<br/>deployment requirement?}
 
     J -- Yes --> K{More configured quotas?}
-    K -- Yes --> G
-    K -- No --> P[Exit 0: allow deployment]
+    K -- Yes --> F
 
     J -- No --> L[Calculate requested limit]
     L --> M[Write per-resource JSON artifact]
     M --> N[Write Markdown summary]
     N --> K
-    K -- No, deficits found --> Q[Exit 2: halt deployment]
+
+    K -- No --> O{Any deficits or<br/>SKU issues recorded?}
+    O -- No --> P[Exit 0: allow deployment]
+    O -- Yes --> Q[Exit 2: halt deployment]
 
     Q --> R{Choose remediation path}
+    R --> R1[SKU issue: change region<br/>or SKU - not fixable by quota request]
     R --> S[Azure Portal request]
     R --> T[Preview request-azure-quota.ps1]
     R --> U[Preview support-ticket payloads]
@@ -135,9 +146,10 @@ flowchart TD
     T4 --> W
     U3 --> W
     V --> Y[Cloud operations reviews issue]
-    W --> Z[Re-run quota validation]
+    R1 --> Z[Re-run quota validation]
+    W --> Z
     Y --> Z
-    Z --> G
+    Z --> F
 ```
 
 The request scripts are dry-run-first. They do not change quota or create
@@ -159,6 +171,13 @@ support tickets unless `-Submit` is explicitly supplied.
   "location": "eastus",
   "quotas": [
     {
+      "name": "Standard D-family v5 vCPUs",
+      "providerNamespace": "Microsoft.Compute",
+      "vmSku": "Standard_D4s_v5",
+      "resourceType": "dedicated",
+      "requiredAvailable": 16
+    },
+    {
       "name": "Total regional vCPUs",
       "providerNamespace": "Microsoft.Compute",
       "resourceName": "cores",
@@ -172,6 +191,13 @@ support tickets unless `-Submit` is explicitly supplied.
 Use `az quota list` to discover the quota resource names exposed for each
 provider and region. AKS and App Service must be represented by the underlying
 VM-family, networking, environment, or SKU quotas consumed by the deployment.
+
+Set `vmSku` on a quota entry (instead of `resourceName`) to validate that an
+exact VM SKU (e.g. `Standard_D4s_v5`) is available in the target region for
+the subscription — not just that its VM family has quota. Azure quota is
+tracked per VM family, so a family can have quota while a specific SKU is
+still restricted in that region. See
+[scripts/README.md](scripts/README.md#sku-specific-validation) for details.
 
 ## Requesting Quota Increases
 

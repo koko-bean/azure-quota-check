@@ -42,6 +42,13 @@ Edit `quota-config.json` in your repository root:
   "location": "eastus",
   "quotas": [
     {
+      "name": "Standard D-family v5 vCPUs",
+      "providerNamespace": "Microsoft.Compute",
+      "vmSku": "Standard_D4s_v5",
+      "resourceType": "dedicated",
+      "requiredAvailable": 16
+    },
+    {
       "name": "Total regional vCPUs",
       "providerNamespace": "Microsoft.Compute",
       "resourceName": "cores",
@@ -51,6 +58,11 @@ Edit `quota-config.json` in your repository root:
   ]
 }
 ```
+
+Set `vmSku` (e.g. `Standard_D4s_v5`) instead of `resourceName` to also confirm
+the exact SKU is offered in the target region/subscription before checking
+its VM-family quota — see [scripts/README.md](../scripts/README.md#sku-specific-validation)
+for details.
 
 Before the workflow can run, a subscription owner must register
 `Microsoft.Quota`. Use `az quota list` to discover valid quota resource names.

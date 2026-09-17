@@ -15,6 +15,40 @@ Configure the quota resources needed by the deployment, such as:
 - **App Service** — SKU-specific Microsoft.Web quota discovered for the subscription
 - **Networking** — Standard Public IPv4 address quota
 
+### SKU-specific validation
+
+Azure tracks compute quota per **VM family** (e.g. `standardDSv3Family`), not
+per exact SKU, so a SKU can have quota available yet still be unusable in a
+region if it is restricted for the subscription. Add `vmSku` to a quota entry
+to validate both:
+
+1. **Regional/subscription availability** — calls `az vm list-skus` and fails
+   the check if the SKU is not returned, or is restricted with a `Location`
+   restriction for the subscription. `Zone` restrictions are reported as a
+   warning rather than a hard failure.
+2. **Family quota** — automatically resolves the VM family for the SKU (via
+   the `family` field from `az vm list-skus`) and runs the normal
+   `az quota show` / `az quota usage show` check against it.
+
+```json
+{
+  "name": "Standard D-family v5 vCPUs",
+  "providerNamespace": "Microsoft.Compute",
+  "vmSku": "Standard_D4s_v5",
+  "resourceType": "dedicated",
+  "requiredAvailable": 16
+}
+```
+
+`resourceName` can still be set explicitly instead of `vmSku` if you already
+know the VM family name; use `vmSku` when you want the script to resolve it
+and validate regional availability for you.
+
+SKU availability issues are **not** quota deficits — they cannot be resolved
+by `request-azure-quota.ps1` or a support ticket. They are written to their
+own `sku-issue-<sku>-<timestamp>.json` artifacts and called out separately in
+the summary so they aren't mistaken for a quota shortfall.
+
 **Usage:**
 
 ```powershell
@@ -238,9 +272,9 @@ pwsh ./scripts/create-github-quota-issue.ps1 -Owner "you" -Repo "your-repo" -Rep
 
 ## Performance
 
-- vCPU check: ~2-5 seconds
-- Resource counts: ~3-10 seconds per service
-- Quota query pair: ~2-10 seconds per configured resource
+- Prerequisite checks (CLI, extension, provider registration, subscription): ~2-5 seconds
+- Quota query pair (`az quota show` + `az quota usage show`): ~2-10 seconds per configured resource
+- SKU availability check (`az vm list-skus`), when `vmSku` is set: adds ~3-8 seconds per resource
 - **Total**: typically under one minute
 
 ## Contributing
