@@ -64,8 +64,18 @@ the exact SKU is offered in the target region/subscription before checking
 its VM-family quota — see [scripts/README.md](../scripts/README.md#sku-specific-validation)
 for details.
 
+For App Service Plans, set `appServicePlanSku` (e.g. `P1V3`) and
+`appServicePlanTier` (e.g. `Premium v3`) instead of `vmSku` — Microsoft.Web
+isn't onboarded to `az quota`, so this checks regional plan-version
+availability and tier quota through `az appservice list-locations` and the
+Microsoft.Web `usages` REST API. See
+[scripts/README.md](../scripts/README.md#app-service-plan-versiontier-validation)
+for details. Deficits found this way require a support ticket, not
+`az quota update`.
+
 Before the workflow can run, a subscription owner must register
-`Microsoft.Quota`. Use `az quota list` to discover valid quota resource names.
+`Microsoft.Quota` (skipped automatically if every configured entry uses
+`appServicePlanSku`). Use `az quota list` to discover valid quota resource names.
 
 ### 5. Commit & Push
 

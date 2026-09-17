@@ -68,22 +68,32 @@ if ($account.id -ne $subscriptionId) {
   exit 3
 }
 
-$quotaExtension = & az extension show --name quota --output none 2>&1
-if ($LASTEXITCODE -ne 0) {
-  [Console]::Error.WriteLine("Azure CLI quota extension is required. Install it with 'az extension add --name quota'.")
-  exit 3
-}
+# App Service Plan entries (appServicePlanSku) use 'az appservice' and
+# 'az rest' against Microsoft.Web directly; Microsoft.Web is not onboarded to
+# the Microsoft.Quota API, so the quota extension/provider registration is
+# only required when at least one entry needs the real 'az quota' commands.
+$needsQuotaApi = @($config.quotas | Where-Object { -not $_.appServicePlanSku }).Count -gt 0
 
-$quotaProvider = Invoke-AzJson -Arguments @(
-  'provider', 'show',
-  '--namespace', 'Microsoft.Quota',
-  '--query', '{state:registrationState}',
-  '--output', 'json'
-) -Description 'Microsoft.Quota provider lookup'
+if ($needsQuotaApi) {
+  $quotaExtension = & az extension show --name quota --output none 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    [Console]::Error.WriteLine("Azure CLI quota extension is required. Install it with 'az extension add --name quota'.")
+    exit 3
+  }
 
-if ($quotaProvider.state -ne 'Registered') {
-  [Console]::Error.WriteLine("Microsoft.Quota is $($quotaProvider.state). A subscription owner must run 'az provider register --namespace Microsoft.Quota'.")
-  exit 3
+  $quotaProvider = Invoke-AzJson -Arguments @(
+    'provider', 'show',
+    '--namespace', 'Microsoft.Quota',
+    '--query', '{state:registrationState}',
+    '--output', 'json'
+  ) -Description 'Microsoft.Quota provider lookup'
+
+  if ($quotaProvider.state -ne 'Registered') {
+    [Console]::Error.WriteLine("Microsoft.Quota is $($quotaProvider.state). A subscription owner must run 'az provider register --namespace Microsoft.Quota'.")
+    exit 3
+  }
+} else {
+  Write-Host "Skipping quota extension/provider registration checks: all configured quotas use appServicePlanSku (Microsoft.Web, checked via az appservice/az rest)." -ForegroundColor DarkGray
 }
 
 Write-Host "Subscription: $subscriptionId"
@@ -120,6 +130,73 @@ function Test-VmSkuAvailability {
   }
 }
 
+function Test-AppServicePlanQuota {
+  param(
+    [Parameter(Mandatory)][string]$Sku,
+    [Parameter(Mandatory)][string]$Tier,
+    [Parameter(Mandatory)][string]$Family,
+    [Parameter(Mandatory)][string]$Location,
+    [Parameter(Mandatory)][string]$SubscriptionId
+  )
+
+  # App Service Plan quota is not exposed via 'az quota' (Microsoft.Web is not
+  # onboarded to that API), so region availability and quota/usage are read
+  # from the classic appservice CLI and the Microsoft.Web usages REST API.
+  $locationsOutput = & az appservice list-locations --sku $Sku --output json 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "App Service Plan SKU location lookup for $Sku failed: $($locationsOutput -join [Environment]::NewLine)"
+  }
+  $locations = @(($locationsOutput -join [Environment]::NewLine) | ConvertFrom-Json)
+
+  $candidateNames = @($Location)
+  $displayNameLookup = Invoke-AzJson -Arguments @(
+    'account', 'list-locations',
+    '--query', "[?name=='$Location' || displayName=='$Location']",
+    '--output', 'json'
+  ) -Description "Location display name lookup for $Location"
+  if ($displayNameLookup -and $displayNameLookup.Count -gt 0) {
+    $candidateNames += [string]$displayNameLookup[0].displayName
+    $candidateNames += [string]$displayNameLookup[0].name
+  }
+  $normalize = { param($value) ($value -replace '[\s_-]', '').ToLowerInvariant() }
+  $normalizedCandidates = @($candidateNames | ForEach-Object { & $normalize $_ } | Select-Object -Unique)
+
+  $regionAvailable = $false
+  foreach ($loc in $locations) {
+    $locName = if ($loc -is [string]) { $loc } else { [string]$loc.name }
+    if ($normalizedCandidates -contains (& $normalize $locName)) {
+      $regionAvailable = $true
+      break
+    }
+  }
+
+  if (-not $regionAvailable) {
+    return [pscustomobject]@{ RegionAvailable = $false; Limit = $null; Usage = $null }
+  }
+
+  $usagesUri = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.Web/locations/$Location/usages?api-version=2023-12-01"
+  $usagesOutput = & az rest --method get --uri $usagesUri --output json 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "Microsoft.Web usage lookup in $Location failed: $($usagesOutput -join [Environment]::NewLine)"
+  }
+  $usages = @((($usagesOutput -join [Environment]::NewLine) | ConvertFrom-Json).value)
+  $normalizedTier = & $normalize $Tier
+
+  $match = $usages | Where-Object {
+    $_.name.value -eq $Family -and (& $normalize $_.name.localizedValue) -eq $normalizedTier
+  } | Select-Object -First 1
+
+  if (-not $match) {
+    return [pscustomobject]@{ RegionAvailable = $true; Limit = $null; Usage = $null }
+  }
+
+  return [pscustomobject]@{
+    RegionAvailable = $true
+    Limit = [int]$match.limit
+    Usage = [int]$match.currentValue
+  }
+}
+
 $deficits = @()
 $skuIssues = @()
 $checkErrors = @()
@@ -130,11 +207,83 @@ foreach ($quota in $config.quotas) {
   $providerNamespace = [string]$quota.providerNamespace
   $resourceName = [string]$quota.resourceName
   $vmSku = [string]$quota.vmSku
+  $appServicePlanSku = [string]$quota.appServicePlanSku
+  $appServicePlanTier = [string]$quota.appServicePlanTier
   $requiredAvailable = [int]$quota.requiredAvailable
   $resourceType = if ($quota.resourceType) { [string]$quota.resourceType } else { 'dedicated' }
 
   Write-Host "`n[$displayName]" -ForegroundColor Yellow
   Write-Host "Provider:           $providerNamespace"
+
+  if ($appServicePlanSku) {
+    Write-Host "App Service SKU:    $appServicePlanSku"
+    Write-Host "App Service tier:   $appServicePlanTier"
+
+    if (-not $appServicePlanTier -or -not $resourceName) {
+      $checkErrors += "$displayName sets appServicePlanSku but is missing appServicePlanTier or resourceName (the underlying VM family, e.g. standardDADSv5Family)."
+      Write-Warning $checkErrors[-1]
+      continue
+    }
+
+    try {
+      $planCheck = Test-AppServicePlanQuota -Sku $appServicePlanSku -Tier $appServicePlanTier -Family $resourceName -Location $config.location -SubscriptionId $subscriptionId
+    } catch {
+      $checkErrors += "$displayName App Service Plan availability lookup failed: $_"
+      Write-Warning $checkErrors[-1]
+      continue
+    }
+
+    if (-not $planCheck.RegionAvailable) {
+      $skuIssues += [pscustomobject]@{
+        requestType = 'sku-unavailable'
+        name = $displayName
+        vmSku = $appServicePlanSku
+        location = [string]$config.location
+        reason = "App Service Plan SKU $appServicePlanSku ($appServicePlanTier) is not offered in $($config.location). Choose a different region or SKU; a quota increase will not resolve this."
+      }
+      Write-Warning "App Service Plan SKU $appServicePlanSku is not offered in $($config.location)."
+      continue
+    }
+
+    if ($null -eq $planCheck.Limit) {
+      $checkErrors += "${displayName}: no Microsoft.Web quota entry matched family '$resourceName' and tier '$appServicePlanTier' in $($config.location). Verify these values with 'az rest --method get --uri https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Web/locations/$($config.location)/usages?api-version=2023-12-01'."
+      Write-Warning $checkErrors[-1]
+      continue
+    }
+
+    $limit = $planCheck.Limit
+    $usage = $planCheck.Usage
+    $available = $limit - $usage
+
+    Write-Host "Current usage:      $usage"
+    Write-Host "Current limit:      $limit"
+    Write-Host "Available:          $available"
+
+    if ($available -lt $requiredAvailable) {
+      $requestedLimit = $usage + $requiredAvailable
+      Write-Warning "Insufficient quota. Requested limit must be at least $requestedLimit."
+      $deficits += [pscustomobject]@{
+        requestType = 'quota'
+        name = $displayName
+        providerNamespace = $providerNamespace
+        resourceName = $resourceName
+        resourceType = $resourceType
+        scope = "/subscriptions/$subscriptionId/providers/$providerNamespace/locations/$($config.location)"
+        location = [string]$config.location
+        currentUsage = $usage
+        currentLimit = $limit
+        available = $available
+        requiredAvailable = $requiredAvailable
+        requestedLimit = $requestedLimit
+        appServicePlanSku = $appServicePlanSku
+        appServicePlanTier = $appServicePlanTier
+        submissionMethod = 'support-ticket'
+      }
+    } else {
+      Write-Host "PASS: sufficient quota is available." -ForegroundColor Green
+    }
+    continue
+  }
 
   if ($vmSku) {
     Write-Host "VM SKU:             $vmSku"
@@ -291,11 +440,17 @@ foreach ($deficit in $deficits) {
   $summary.AppendLine("## $($deficit.name)") | Out-Null
   $summary.AppendLine("- Provider: $($deficit.providerNamespace)") | Out-Null
   $summary.AppendLine("- Quota resource: $($deficit.resourceName)") | Out-Null
+  if ($deficit.appServicePlanSku) {
+    $summary.AppendLine("- App Service Plan SKU: $($deficit.appServicePlanSku) ($($deficit.appServicePlanTier))") | Out-Null
+  }
   $summary.AppendLine("- Current usage: $($deficit.currentUsage)") | Out-Null
   $summary.AppendLine("- Current limit: $($deficit.currentLimit)") | Out-Null
   $summary.AppendLine("- Available: $($deficit.available)") | Out-Null
   $summary.AppendLine("- Required available: $($deficit.requiredAvailable)") | Out-Null
   $summary.AppendLine("- Requested limit: $($deficit.requestedLimit)") | Out-Null
+  if ($deficit.submissionMethod -eq 'support-ticket') {
+    $summary.AppendLine("- Submission method: Azure support ticket (Microsoft.Web is not adjustable via 'az quota update')") | Out-Null
+  }
   $summary.AppendLine() | Out-Null
 }
 

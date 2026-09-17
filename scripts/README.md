@@ -49,6 +49,43 @@ by `request-azure-quota.ps1` or a support ticket. They are written to their
 own `sku-issue-<sku>-<timestamp>.json` artifacts and called out separately in
 the summary so they aren't mistaken for a quota shortfall.
 
+### App Service Plan version/tier validation
+
+App Service Plans have multiple pricing-tier "versions" of the same size
+(e.g. `S1` vs `P1V2` vs `P1V3` vs `I1V2`), and Microsoft.Web is **not**
+onboarded to the `az quota` API, so this uses a separate two-part check keyed
+off `appServicePlanSku` instead of `vmSku`:
+
+1. **Regional availability** — calls `az appservice list-locations --sku
+   <sku>` to confirm the exact plan SKU/version is offered in the configured
+   region. This also validates the SKU name itself (the CLI rejects unknown
+   values).
+2. **Tier quota** — calls the Microsoft.Web `usages` REST API
+   (`az rest --uri https://management.azure.com/subscriptions/<id>/providers/Microsoft.Web/locations/<region>/usages?api-version=2023-12-01`)
+   and matches the entry whose family equals `resourceName` **and** whose
+   localized name equals `appServicePlanTier` (e.g. `"Premium v3"`), since a
+   single VM family can host multiple plan tiers with independent quota.
+
+```json
+{
+  "name": "Premium v3 App Service Plan cores",
+  "providerNamespace": "Microsoft.Web",
+  "resourceName": "standardDADSv5Family",
+  "appServicePlanSku": "P1V3",
+  "appServicePlanTier": "Premium v3",
+  "requiredAvailable": 4
+}
+```
+
+When any entry uses `appServicePlanSku`, `check-azure-quotas.ps1` skips the
+`az quota` extension/`Microsoft.Quota` registration prerequisite checks for
+that entry, since it never calls `az quota`. Deficits found this way are
+marked `submissionMethod: support-ticket` and are automatically skipped (with
+a warning) by `request-azure-quota.ps1`, because Microsoft.Web quota
+increases must go through `submit-azure-support-ticket.ps1` (the
+`Microsoft.Web` classification is already mapped in that script), not
+`az quota update`.
+
 **Usage:**
 
 ```powershell

@@ -51,8 +51,18 @@ if ($requestFiles.Count -eq 0) {
   exit 3
 }
 
+$skippedRequests = @()
 $requests = foreach ($file in $requestFiles) {
   $request = Get-Content $file.FullName -Raw | ConvertFrom-Json
+
+  if ($request.submissionMethod -eq 'support-ticket') {
+    # e.g. App Service Plan quota: Microsoft.Web is not onboarded to the
+    # self-service Microsoft.Quota API, so 'az quota update' cannot request
+    # it. Route these to submit-azure-support-ticket.ps1 instead.
+    $skippedRequests += $request
+    continue
+  }
+
   foreach ($property in @('resourceName', 'resourceType', 'scope', 'requestedLimit')) {
     if ($null -eq $request.$property -or [string]::IsNullOrWhiteSpace([string]$request.$property)) {
       [Console]::Error.WriteLine("$($file.Name) is missing required property '$property'.")
@@ -60,6 +70,18 @@ $requests = foreach ($file in $requestFiles) {
     }
   }
   $request
+}
+
+if ($skippedRequests.Count -gt 0) {
+  Write-Step "Skipping requests that require a support ticket"
+  foreach ($skipped in $skippedRequests) {
+    Write-Warning "$($skipped.name) cannot be requested via 'az quota update' ($($skipped.providerNamespace) is not adjustable through the Quota API). Use submit-azure-support-ticket.ps1 instead."
+  }
+}
+
+if ($requests.Count -eq 0) {
+  Write-Host "`nNo adjustable quota requests remain after excluding support-ticket-only items." -ForegroundColor Yellow
+  exit 0
 }
 
 Write-Step "Prepared quota updates"

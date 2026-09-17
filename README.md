@@ -68,7 +68,8 @@ azure-quota-check/
 | Resource | Source | Check Type |
 |----------|--------|-----------|
 | vCPU and VM families | `az quota` | Available capacity |
-| App Service | `az quota` when supported | SKU-specific available capacity |
+| Exact VM SKUs | `az vm list-skus` + `az quota` | Regional/subscription availability + family capacity |
+| App Service plan tiers | `az appservice list-locations` + Microsoft.Web `usages` REST API | Regional availability + tier-specific capacity |
 | AKS dependencies | `az quota` | VM-family and network capacity |
 | Container Apps | `az quota` | Environment and workload-profile capacity |
 | Public IPs | `az quota` | Available capacity |
@@ -95,7 +96,9 @@ flowchart TD
     A[Deployment pipeline starts] --> B[Authenticate to Azure]
     B --> C{Azure context matches<br/>configured subscription?}
     C -- No --> X1[Exit 3: configuration or authentication error]
-    C -- Yes --> D{Quota extension installed?}
+    C -- Yes --> D0{Any entry needs az quota?<br/>i.e. not solely appServicePlanSku}
+    D0 -- No --> F
+    D0 -- Yes --> D{Quota extension installed?}
     D -- No --> X2[Exit 3: install Azure CLI quota extension]
     D -- Yes --> E{Microsoft.Quota registered?}
     E -- No --> X3[Exit 3: subscription owner must register provider]
@@ -108,7 +111,17 @@ flowchart TD
     F4 --> K
     F3 -- Yes --> F5[Resolve VM family from SKU]
     F5 --> G
-    F1 -- No --> G
+    F1 -- No --> F6{Entry specifies<br/>appServicePlanSku?}
+
+    F6 -- Yes --> F7[Query az appservice list-locations for SKU]
+    F7 --> F8{SKU/version offered<br/>in region?}
+    F8 -- No --> F4
+    F8 -- Yes --> F9[Query Microsoft.Web usages REST API,<br/>match family + tier name]
+    F9 --> F10{Matching tier<br/>quota entry found?}
+    F10 -- No --> X4[Exit 3: tier/family mismatch, fix config]
+    F10 -- Yes --> I2[Calculate available = limit - usage<br/>mark submissionMethod: support-ticket]
+    I2 --> J
+    F6 -- No --> G
 
     G[Query limit with az quota show] --> H[Query usage with az quota usage show]
     H --> I[Calculate available = limit - usage]
@@ -133,7 +146,10 @@ flowchart TD
     R --> U[Preview support-ticket payloads]
     R --> V[Create GitHub issue]
 
-    T --> T1{Explicit -Submit<br/>and Quota Request Operator?}
+    T --> T0{Deficit submissionMethod<br/>== support-ticket?}
+    T0 -- Yes --> T5[Skip with warning:<br/>route to submit-azure-support-ticket.ps1]
+    T5 --> U
+    T0 -- No --> T1{Explicit -Submit<br/>and Quota Request Operator?}
     T1 -- No --> T2[Dry-run only]
     T1 -- Yes --> T3[Submit az quota update]
     T3 --> T4[Check quota request status]
@@ -198,6 +214,28 @@ the subscription — not just that its VM family has quota. Azure quota is
 tracked per VM family, so a family can have quota while a specific SKU is
 still restricted in that region. See
 [scripts/README.md](scripts/README.md#sku-specific-validation) for details.
+
+App Service Plans have separate pricing-tier "versions" of each size (e.g.
+`P1V2` vs `P1V3` vs `I1V2`), and Microsoft.Web isn't onboarded to `az quota`.
+Set `appServicePlanSku` (e.g. `P1V3`) and `appServicePlanTier` (e.g.
+`Premium v3`) on a quota entry to validate both that the exact plan
+version is offered in the region (`az appservice list-locations`) and that
+its tier still has available capacity (Microsoft.Web `usages` REST API):
+
+```json
+{
+  "name": "Premium v3 App Service Plan cores",
+  "providerNamespace": "Microsoft.Web",
+  "resourceName": "standardDADSv5Family",
+  "appServicePlanSku": "P1V3",
+  "appServicePlanTier": "Premium v3",
+  "requiredAvailable": 4
+}
+```
+
+Deficits found this way require a support ticket rather than
+`az quota update` — see
+[scripts/README.md](scripts/README.md#app-service-plan-versiontier-validation).
 
 ## Requesting Quota Increases
 

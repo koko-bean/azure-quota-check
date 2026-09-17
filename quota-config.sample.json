@@ -29,6 +29,14 @@
       "resourceName": "IPv4StandardSkuPublicIpAddresses",
       "resourceType": "dedicated",
       "requiredAvailable": 2
+    },
+    {
+      "name": "Premium v3 App Service Plan cores",
+      "providerNamespace": "Microsoft.Web",
+      "resourceName": "standardDADSv5Family",
+      "appServicePlanSku": "P1V3",
+      "appServicePlanTier": "Premium v3",
+      "requiredAvailable": 4
     }
   ]
 }
